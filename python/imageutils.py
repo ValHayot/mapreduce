@@ -403,7 +403,7 @@ def insert_in_dict(data_dict, split_name, remaining_mem, mem, bytes_per_voxel, y
     split_shape[0] * split_shape[1] * split_shape[2])
 
     try:
-        if split_bytes > mem:
+        if mem is not None and split_bytes > mem:
             raise IOError(
                 'Size of split ({0} bytes) is greater than total available memory ({1} bytes)'.format(split_bytes, mem))
     except IOError as e:
@@ -416,7 +416,7 @@ def insert_in_dict(data_dict, split_name, remaining_mem, mem, bytes_per_voxel, y
         remaining_mem = remaining_mem - (split_bytes)
 
     # if the split cannot be read into memory, return split name such that it can be stored to be read during next clustered read iteration
-    if remaining_mem is not None and remaining_mem <= 0:
+    if remaining_mem is not None and remaining_mem < 0:
         return split_name, remaining_mem, read_time
 
     else:
@@ -425,20 +425,38 @@ def insert_in_dict(data_dict, split_name, remaining_mem, mem, bytes_per_voxel, y
 
         # if split is a slice, the entire array can be flattened as it is all contiguous memory. Otherwise, needs to be partitioned into contiguous chunks.
         if split_shape[0] == y_size and split_shape[1] == z_size:
-            data_dict[split.header.single_vox_offset + bytes_per_voxel * (
-            int(split_pos[-3]) + (int(split_pos[-2])) * y_size + (
-            int(split_pos[-1])) * y_size * z_size)] = data.flatten('F')
+            key = split.header.single_vox_offset + bytes_per_voxel * (
+                    int(split_pos[-3]) + (int(split_pos[-2])) * y_size + (int(split_pos[-1])) * y_size * z_size + (split_shape[0] * split_shape[1] * split_shape[2]))
+            
+            start_pos = split.header.single_vox_offset + bytes_per_voxel * (
+                    int(split_pos[-3]) + (int(split_pos[-2])) * y_size + (int(split_pos[-1])) * y_size * z_size)
+            
+            if start_pos in data_dict:
+                data_dict[start_pos] += bytearray(data.flatten('F'))
+                data_dict[key] = data_dict[start_pos]
+                del data_dict[start_pos]
+            else:
+                data_dict[key] = bytearray(data.flatten('F'))
         else:
             for i in range(0, split_shape[2]):
                 for j in range(0, split_shape[1]):
                     key = split.header.single_vox_offset + bytes_per_voxel * (
-                    int(split_pos[-3]) + (int(split_pos[-2]) + j) * y_size + (int(split_pos[-1]) + i) * y_size * z_size)
-                    data_dict[key] = data[..., j, i].flatten('F')
+                    int(split_pos[-3]) + (int(split_pos[-2]) + j) * y_size + (int(split_pos[-1]) + i) * y_size * z_size + (split_shape[0]))
 
+                    start_pos = split.header.single_vox_offset + bytes_per_voxel * (
+                    int(split_pos[-3]) + (int(split_pos[-2]) + j) * y_size + (int(split_pos[-1]) + i) * y_size * z_size)
+                    
+                    if start_pos in data_dict :
+                        data_dict[start_pos] += bytearray(data[..., j, i].flatten('F'))
+                        data_dict[key] = data_dict[start_pos]
+                        del data_dict[start_pos]
+                    else:
+                        data_dict[key] = bytearray(data[..., j, i].flatten('F'))
         read_time = time() - read_s
         print "Read time: ", read_time
 
     return None, remaining_mem, read_time
+
 
 
 def write_to_file(data_dict, reconstructed, bytes_per_voxel):
@@ -460,11 +478,11 @@ def write_to_file(data_dict, reconstructed, bytes_per_voxel):
     print "Writing data"
     for k in sorted(data_dict.keys()):
         seek_start = time()
-        reconstructed.seek(k, 0)
+        reconstructed.seek(k - len(data_dict[k]), 0)
         seek_time += time() - seek_start
 
         write_start = time()
-        reconstructed.write(data_dict[k].tobytes('F'))
+        reconstructed.write(data_dict[k])
         write_time += time() - write_start
 
         # can remove from dictionary
@@ -485,21 +503,27 @@ def defrag_dict(data_dict, bytes_per_voxel):
     """
 
     def_s = time()
-    previous_k = None
     print "Dictionary size: ", len(data_dict)
     for k in sorted(data_dict.keys()):
-        if previous_k is not None and k == previous_k + (data_dict[previous_k].shape[0] * bytes_per_voxel):
-            data_dict[previous_k].resize(len(data_dict[previous_k]) + len(data_dict[k]))
-            data_dict[previous_k][-len(data_dict[k]):] = data_dict[k]
-            del data_dict[k]
-        else:
-            previous_k = k
+        try:
+            prev = k - len(data_dict[k])
+            if prev in data_dict:
+
+                data_dict[prev] += data_dict[k]
+                data_dict[k] = data_dict[prev]
+                del data_dict[prev]
+        except KeyError:
+            print k in data_dict
+            pass
 
     defrag_time = time() - def_s
     print "Defragmentation time: ", time() - def_s
     print "Dictionary size after defragmentation: ", len(data_dict)
 
     return defrag_time
+
+
+
 
 
 def generate_header(first_dim, second_dim, third_dim, dtype):
